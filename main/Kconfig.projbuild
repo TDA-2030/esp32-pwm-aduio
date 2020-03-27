@@ -1,0 +1,24 @@
+menu "Example Configuration"
+
+    config LEFT_CHANNEL_GPIO
+        int "left channel GPIO number"
+        range 0 34
+        default 17
+        help
+            GPIO number (IOxx) to output left channel audio.
+
+    config RIGHT_CHANNEL_GPIO
+        int "right channel GPIO number"
+        range 0 34
+        default 18
+        help
+            GPIO number (IOxx) to output right channel audio.
+
+    config AUDIO_SAMPLE_RATE
+        int "Audio sample Rate"
+        range 10000 48000
+        default 44100
+        help
+            Played audio at this sample rate
+
+endmenu
