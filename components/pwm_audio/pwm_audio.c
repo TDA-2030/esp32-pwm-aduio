@@ -1,6 +1,18 @@
-/* LED PWM PWM playing audio example
+// Copyright 2020 Espressif Systems (Shanghai) PTE LTD
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-*/
+
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -16,8 +28,16 @@
 #include "soc/ledc_reg.h"
 #include "hal/gpio_ll.h"
 #include "soc/timer_group_caps.h"
-#include "sdkconfig.h"
 #include "pwm_audio.h"
+#include "sdkconfig.h"
+
+#ifndef CONFIG_IDF_TARGET_ESP32S2
+#ifndef CONFIG_IDF_TARGET_ESP32
+    #error No defined idf target esp32 or esp32s2
+#endif
+#endif  
+
+
 #ifdef CONFIG_IDF_TARGET_ESP32S2
 #include "esp32s2/rom/ets_sys.h"
 #endif /**< CONFIG_IDF_TARGET_ESP32S2 */
@@ -43,6 +63,7 @@ static const char *PWM_AUDIO_STATUS_ERROR     = "PWM AUDIO STATUS ERROR";
 static const char *PWM_AUDIO_TG_NUM_ERROR     = "PWM AUDIO TIMER GROUP NUMBER ERROR";
 static const char *PWM_AUDIO_TIMER_NUM_ERROR  = "PWM AUDIO TIMER NUMBER ERROR";
 static const char *PWM_AUDIO_ALLOC_ERROR      = "PWM AUDIO ALLOC ERROR";
+static const char *PWM_AUDIO_RESOLUTION_ERROR = "PWM AUDIO RESOLUTION ERROR";
 
 #define BUFFER_MIN_SIZE (128UL)
 #define SAMPLE_RATE_MAX (48000)
@@ -58,7 +79,7 @@ typedef struct {
     uint32_t volatile head;            /**< ending pointer */
     uint32_t volatile tail;            /**< Read pointer */
     uint32_t size;                     /**< Buffer size */
-
+    uint32_t is_give;                  /**<  */
     SemaphoreHandle_t semaphore_rb;    /**< Semaphore for ringbuffer */
 
 } ringBuf;
@@ -72,10 +93,20 @@ typedef struct {
     ringbuf_handle_t      ringbuf;                         /**< audio ringbuffer pointer */
     uint32_t              channel_mask;                    /**< channel gpio mask */
     uint32_t              channel_set_mask;                /**< channel set mask */
+    int32_t               framerate;                /*!< frame rates in Hz */
+    int32_t               bits_per_sample;          /*!< bits per sample (8, 16, 32) */
 
     pwm_audio_status_t status;
 } pwm_audio_handle;
 typedef pwm_audio_handle *pwm_audio_handle_t;
+
+/**< ledc some register pointer */
+static volatile uint32_t *g_ledc_left_conf0_val  = NULL;
+static volatile uint32_t *g_ledc_left_conf1_val  = NULL;
+static volatile uint32_t *g_ledc_left_duty_val   = NULL;
+static volatile uint32_t *g_ledc_right_conf0_val = NULL;
+static volatile uint32_t *g_ledc_right_conf1_val = NULL;
+static volatile uint32_t *g_ledc_right_duty_val  = NULL;
 
 /**< pwm audio handle pointer */
 static pwm_audio_handle_t g_pwm_audio_handle = NULL;
@@ -123,7 +154,7 @@ static ringbuf_handle_t rb_create(int size)
         if (!_success) {
             break;
         }
-
+        rb->is_give = 0;
         rb->buf = buf;
         rb->head = rb->tail = 0;
         rb->size = size;
@@ -152,26 +183,33 @@ static uint32_t IRAM_ATTR rb_get_free(ringbuf_handle_t rb)
     return (rb->size - rb_get_count(rb) - 1);
 }
 
-static esp_err_t IRAM_ATTR rb_read_byte(ringbuf_handle_t rb, char *outdata)
+static esp_err_t rb_flush(ringbuf_handle_t rb)
 {
-    if (rb->tail == rb->head) {
+    rb->tail = rb->head=0;
+    return ESP_OK;
+}
+
+static esp_err_t IRAM_ATTR rb_read_byte(ringbuf_handle_t rb, uint8_t *outdata)
+{
+    uint32_t tail = rb->tail;
+    if (tail == rb->head) {
         return ESP_FAIL;
     }
 
     // Send a byte from the buffer
-    *outdata = rb->buf[rb->tail];
+    *outdata = rb->buf[tail];
 
     // Update tail position
-    rb->tail++;
+    tail++;
 
-    if (rb->tail == rb->size) {
-        rb->tail = 0;
+    if (tail == rb->size) {
+        tail = 0;
     }
-
+    rb->tail = tail;
     return ESP_OK;
 }
 
-static esp_err_t rb_write_byte(ringbuf_handle_t rb, const char indata)
+static esp_err_t rb_write_byte(ringbuf_handle_t rb, const uint8_t indata)
 {
     // Calculate next head
     uint32_t next_head = rb->head + 1;
@@ -189,8 +227,9 @@ static esp_err_t rb_write_byte(ringbuf_handle_t rb, const char indata)
     rb->head = next_head;
     return ESP_OK;
 }
-static esp_err_t rb_write(ringbuf_handle_t rb, const char *inbuf, size_t len, size_t *bytes_written, TickType_t ticks_to_wait)
+static esp_err_t rb_write(ringbuf_handle_t rb, const uint8_t *inbuf, size_t len, size_t *bytes_written, TickType_t ticks_to_wait)
 {
+    rb->is_give = 0; /**< As long as it's written, it's allowed to give semaphore again */
     if (xSemaphoreTake(rb->semaphore_rb, ticks_to_wait) == pdTRUE) {
         size_t free = rb_get_free(rb);
         size_t bytes_can_write = len;
@@ -198,9 +237,91 @@ static esp_err_t rb_write(ringbuf_handle_t rb, const char *inbuf, size_t len, si
         if (len > free) {
             bytes_can_write = free;
         }
+        bytes_can_write &= 0xfffffffc;//Aligned data, bytes_can_write should be an integral multiple of 4
+        if(0 == bytes_can_write)
+        {
+            *bytes_written = len;  // Discard the last misaligned bytes of data directly
+            return ESP_OK;
+        }
 
-        for (size_t i = 0; i < bytes_can_write; i++) {
-            rb_write_byte(rb, inbuf[i]);
+        pwm_audio_handle_t handle = g_pwm_audio_handle;
+        int8_t shift = handle->bits_per_sample - handle->config.duty_resolution;
+        uint32_t len = bytes_can_write;
+        switch (handle->bits_per_sample)
+        {
+            case 8:{
+                
+            if(shift<0){
+                uint16_t value;
+                uint8_t temp;
+                shift = -shift;
+                len >>=1;
+                bytes_can_write >>=1;
+                for (size_t i = 0; i < len; i++) {
+                    temp = inbuf[i] + 0x7f; /**< offset */
+                    value = temp << shift;
+                    rb_write_byte(rb, value);
+                    rb_write_byte(rb, value>>8);
+                }
+
+            }else{
+                uint8_t value;
+                for (size_t i = 0; i < len; i++) {
+                    value = inbuf[i] + 0x7f; /**< offset */
+                    rb_write_byte(rb, value);
+                }
+            }
+            }break;
+
+            case 16:{
+            len >>= 1;
+            uint16_t *buf_16b = (uint16_t*)inbuf;
+            uint16_t value;
+            int16_t temp;
+            if (handle->config.duty_resolution > 8){
+                for (size_t i = 0; i < len; i++) {
+                    temp = buf_16b[i];
+                    value = temp+0x7fff;
+                    value >>= shift;
+                    rb_write_byte(rb, value);
+                    rb_write_byte(rb, value>>8);
+                }
+            }else{
+                for (size_t i = 0; i < len; i++) {
+                    temp = buf_16b[i];
+                    value = temp+0x7fff;
+                    value >>= shift;
+                    rb_write_byte(rb, value);
+                }
+            }
+
+            }break;
+
+            case 32:{
+            len >>= 2;
+            uint32_t *buf_32b = (uint32_t*)inbuf;
+            uint32_t value;
+            int32_t temp;
+            if (handle->config.duty_resolution > 8){
+                for (size_t i = 0; i < len; i++) {
+                    temp = buf_32b[i];
+                    value = temp+0x7fffffff;
+                    value >>= shift;
+                    rb_write_byte(rb, value);
+                    rb_write_byte(rb, value>>8);
+                }
+            } else {
+                for (size_t i = 0; i < len; i++) {
+                    temp = buf_32b[i];
+                    value = temp+0x7fffffff;
+                    value >>= shift;
+                    rb_write_byte(rb, value);
+                }
+            }
+            }break;
+        
+        default:
+            break;
         }
 
         *bytes_written = bytes_can_write;
@@ -209,55 +330,30 @@ static esp_err_t rb_write(ringbuf_handle_t rb, const char *inbuf, size_t len, si
     return ESP_OK;
 }
 
-/**
- * @brief Scale data to 16bit/32bit for pwm audio output.
- *        pwm audio can only output 8bit data value.
- */
-static int audio_data_scale(int bits, uint8_t *sBuff, uint32_t len)
-{
-    if (bits == 16) {
-        short *buf16 = (short *)sBuff;
-        int k = len >> 1;
-
-        for (int i = 0; i < k; i++) {
-            buf16[i] &= 0xff00;
-            buf16[i] += 0x8000;//turn signed value into unsigned, expand negative value into positive range
-        }
-    } else if (bits == 32) {
-        int *buf32 = (int *)sBuff;
-        int k = len >> 2;
-
-        for (int i = 0; i < k; i++) {
-            buf32[i] &= 0xff000000;
-            buf32[i] += 0x80000000;//turn signed value into unsigned
-        }
-    } else {
-
-        return 0;
-    }
-
-    return 0;
-}
 /*
  * Note:
  * In order to improve efficiency, register is operated directly
  */
-static inline void ledc_set_duty_fast(ledc_mode_t speed_mode, ledc_channel_t channel_num, uint32_t duty_val)
+static inline void ledc_set_left_duty_fast(uint32_t duty_val)
 {
-    LEDC.channel_group[speed_mode].channel[channel_num].duty.duty = (duty_val) << 4; /* Discard decimal part */
-    LEDC.channel_group[speed_mode].channel[channel_num].conf0.sig_out_en = 1;
-    LEDC.channel_group[speed_mode].channel[channel_num].conf1.duty_start = 1;
-    LEDC.channel_group[speed_mode].channel[channel_num].conf0.low_speed_update = 1;
+    *g_ledc_left_duty_val = (duty_val) << 4; /* Discard decimal part */
+    *g_ledc_left_conf0_val |= 0x00000014;
+    *g_ledc_left_conf1_val |= 0x80000000;
 }
+static inline void ledc_set_right_duty_fast(uint32_t duty_val)
+{
+    *g_ledc_right_duty_val = (duty_val) << 4; /* Discard decimal part */
+    *g_ledc_right_conf0_val |= 0x00000014;
+    *g_ledc_right_conf1_val |= 0x80000000;
+}
+
 
 /*
  * Timer group ISR handler
  */
 static void IRAM_ATTR timer_group_isr(void *para)
 {
-    
     pwm_audio_handle_t handle = g_pwm_audio_handle;
-
     if (handle == NULL) {
         ets_printf("pwm audio not initialized\n");
         return;
@@ -287,54 +383,35 @@ static void IRAM_ATTR timer_group_isr(void *para)
     handle->timg_dev->hw_timer[handle->config.timer_num].config.alarm_en = TIMER_ALARM_EN;
 
 #endif /**< CONFIG_IDF_TARGET_ESP32 */
-
-    char wave_h, wave_l;
+GPIO.out_w1ts=0x8000;
+    uint8_t wave_h, wave_l;
     uint16_t value;
     /**< Output several channels when several pins are configured */
 
     if (handle->channel_mask & CHANNEL_LEFT_MASK) { /**< Determine whether the channel is configured */
-        if (handle->config.bits_per_sample > 8) {
+        if (handle->config.duty_resolution > 8) {
             rb_read_byte(handle->ringbuf, &wave_l);
-
             if (ESP_OK == rb_read_byte(handle->ringbuf, &wave_h)) {
-                int16_t i = ((wave_h << 8) | wave_l);
-                value = i + (1 << (handle->config.bits_per_sample - 1)); /**< offset */
-                /**< set the PWM duty */
-                ledc_set_duty_fast(handle->ledc_channel[CHANNEL_LEFT_INDEX].speed_mode, handle->ledc_channel[CHANNEL_LEFT_INDEX].channel, value);
+                value = ((wave_h << 8) | wave_l);
+                ledc_set_left_duty_fast(value);/**< set the PWM duty */
             }
-        } else {/**< spend 1.04us */GPIO.out_w1ts=0x8000;
+        } else {
             if (ESP_OK == rb_read_byte(handle->ringbuf, &wave_h)) {
-                wave_h += 0x80; /**< offset */
-                /**< set the PWM duty */
-                ledc_set_duty_fast(handle->ledc_channel[CHANNEL_LEFT_INDEX].speed_mode, handle->ledc_channel[CHANNEL_LEFT_INDEX].channel, wave_h);
-            }GPIO.out_w1tc=0x8000;
+                ledc_set_left_duty_fast(wave_h);/**< set the PWM duty */
+            }
         }
     }
 
     if (handle->channel_mask & CHANNEL_RIGHT_MASK) { /**< Determine whether the channel is configured */
-        if (handle->config.bits_per_sample > 8) {
-            rb_read_byte(handle->ringbuf, &wave_l);
-
-            if (ESP_OK == rb_read_byte(handle->ringbuf, &wave_h)) {
-                int16_t i = ((wave_h << 8) | wave_l);
-                value = i + (1 << (handle->config.bits_per_sample - 1)); /**< offset */
-                /**< set the PWM duty */
-                ledc_set_duty_fast(handle->ledc_channel[CHANNEL_LEFT_INDEX].speed_mode, handle->ledc_channel[CHANNEL_LEFT_INDEX].channel, value);
-            }
-        } else {
-            if (ESP_OK == rb_read_byte(handle->ringbuf, &wave_h)) {
-                wave_h += 0x80; /**< offset */
-                /**< set the PWM duty */
-                ledc_set_duty_fast(handle->ledc_channel[CHANNEL_LEFT_INDEX].speed_mode, handle->ledc_channel[CHANNEL_LEFT_INDEX].channel, wave_h);
-            }
-        }
+       
     }
-
-    /**
-     * Send semaphore when buffer is less than minimum
+GPIO.out_w1tc=0x8000;
+    /**GPIO.out_w1tc=0x8000;
+     * Send semaphore when buffer free is more than BUFFER_MIN_SIZE
      */
-    if (rb_get_free(handle->ringbuf) > BUFFER_MIN_SIZE) {
-        /**< spend 2.71us */
+    if (0 == handle->ringbuf->is_give && rb_get_free(handle->ringbuf) > BUFFER_MIN_SIZE) {
+        /**< The execution time of the following code is 2.71 microsecond */
+        handle->ringbuf->is_give = 1; /**< To prevent multiple give semaphores */
         BaseType_t xHigherPriorityTaskWoken;
         xSemaphoreGiveFromISR(handle->ringbuf->semaphore_rb, &xHigherPriorityTaskWoken);
         if (pdFALSE != xHigherPriorityTaskWoken) {
@@ -356,6 +433,7 @@ esp_err_t pwm_audio_init(const pwm_audio_config_t *cfg)
     PWM_AUDIO_CHECK(cfg != NULL, PWM_AUDIO_PARAM_ADDR_ERROR, ESP_ERR_INVALID_ARG);
     PWM_AUDIO_CHECK(cfg->tg_num < TIMER_GROUP_MAX, PWM_AUDIO_TG_NUM_ERROR, ESP_ERR_INVALID_ARG);
     PWM_AUDIO_CHECK(cfg->timer_num < TIMER_MAX, PWM_AUDIO_TIMER_NUM_ERROR, ESP_ERR_INVALID_ARG);
+    PWM_AUDIO_CHECK(cfg->duty_resolution <= 10 && cfg->duty_resolution >= 8, PWM_AUDIO_RESOLUTION_ERROR, ESP_ERR_INVALID_ARG);
 
     pwm_audio_handle_t handle = NULL;
 
@@ -369,6 +447,9 @@ esp_err_t pwm_audio_init(const pwm_audio_config_t *cfg)
     handle->config = *cfg;
     g_pwm_audio_handle = handle;
 
+    /**
+     * config ledc to generate pwm 
+     */
     if (cfg->tg_num == TIMER_GROUP_0) {
         handle->timg_dev = &TIMERG0;
     } else {
@@ -405,7 +486,32 @@ esp_err_t pwm_audio_init(const pwm_audio_config_t *cfg)
 
     PWM_AUDIO_CHECK(0 != handle->channel_mask, PWM_AUDIO_PARAM_ERROR, ESP_ERR_INVALID_ARG);
 
-    res = pwm_audio_set_param(cfg->framerate, cfg->bits_per_sample, 2);
+#ifdef CONFIG_IDF_TARGET_ESP32S2
+    handle->ledc_timer.clk_cfg = LEDC_USE_APB_CLK;
+#endif
+    handle->ledc_timer.speed_mode = LEDC_LOW_SPEED_MODE;
+    handle->ledc_timer.duty_resolution = handle->config.duty_resolution;
+    handle->ledc_timer.timer_num = handle->config.ledc_timer_sel;
+    uint32_t freq = (APB_CLK_FREQ / (1 << handle->ledc_timer.duty_resolution));
+    handle->ledc_timer.freq_hz = freq - (freq % 1000); // fixed PWM frequency ,It's a multiple of 1000
+    res = ledc_timer_config(&handle->ledc_timer);
+    PWM_AUDIO_CHECK(res == ESP_OK, PWM_AUDIO_PARAM_ERROR, ESP_ERR_INVALID_ARG);
+
+    g_ledc_left_duty_val = &LEDC.channel_group[handle->ledc_timer.speed_mode].\
+    channel[handle->ledc_channel[CHANNEL_LEFT_INDEX].channel].duty.val;
+    g_ledc_left_conf0_val = &LEDC.channel_group[handle->ledc_timer.speed_mode].\
+    channel[handle->ledc_channel[CHANNEL_LEFT_INDEX].channel].conf0.val;
+    g_ledc_left_conf1_val = &LEDC.channel_group[handle->ledc_timer.speed_mode].\
+    channel[handle->ledc_channel[CHANNEL_LEFT_INDEX].channel].conf1.val;
+    g_ledc_right_duty_val = &LEDC.channel_group[handle->ledc_timer.speed_mode].\
+    channel[handle->ledc_channel[CHANNEL_RIGHT_INDEX].channel].duty.val;
+    g_ledc_right_conf0_val = &LEDC.channel_group[handle->ledc_timer.speed_mode].\
+    channel[handle->ledc_channel[CHANNEL_RIGHT_INDEX].channel].conf0.val;
+    g_ledc_right_conf1_val = &LEDC.channel_group[handle->ledc_timer.speed_mode].\
+    channel[handle->ledc_channel[CHANNEL_RIGHT_INDEX].channel].conf1.val;
+
+    /**< set a initial parameter */
+    res = pwm_audio_set_param(16000, 8, 2);
     PWM_AUDIO_CHECK(ESP_OK == res, PWM_AUDIO_PARAM_ERROR, ESP_ERR_INVALID_ARG);
 
     handle->status = PWM_AUDIO_STATUS_IDLE;
@@ -416,29 +522,18 @@ esp_err_t pwm_audio_init(const pwm_audio_config_t *cfg)
 
 esp_err_t pwm_audio_set_param(int rate, ledc_timer_bit_t bits, int ch)
 {
-    esp_err_t res;
+    esp_err_t res = ESP_OK;
 
     PWM_AUDIO_CHECK(g_pwm_audio_handle->status != PWM_AUDIO_STATUS_BUSY, PWM_AUDIO_STATUS_ERROR, ESP_ERR_INVALID_ARG);
     PWM_AUDIO_CHECK(rate <= SAMPLE_RATE_MAX && rate >= SAMPLE_RATE_MIN, PWM_AUDIO_FRAMERATE_ERROR, ESP_ERR_INVALID_ARG);
-    PWM_AUDIO_CHECK(bits <= 12 && bits >= 8, PWM_AUDIO_FRAMERATE_ERROR, ESP_ERR_INVALID_ARG);
+    PWM_AUDIO_CHECK(bits == 32 || bits == 16 || bits == 8, PWM_AUDIO_FRAMERATE_ERROR, ESP_ERR_INVALID_ARG);
     PWM_AUDIO_CHECK(ch <= 2 && ch >= 1, PWM_AUDIO_FRAMERATE_ERROR, ESP_ERR_INVALID_ARG);
 
     pwm_audio_handle_t handle = g_pwm_audio_handle;
 
-    handle->config.framerate = rate;
-    handle->config.bits_per_sample = bits;
-    handle->channel_set_mask = ch == 1 ? 0x00000001 : 0x00000003;
-
-#ifdef CONFIG_IDF_TARGET_ESP32S2
-    handle->ledc_timer.clk_cfg = LEDC_USE_APB_CLK;
-#endif
-    handle->ledc_timer.speed_mode = LEDC_LOW_SPEED_MODE;
-    handle->ledc_timer.duty_resolution = handle->config.bits_per_sample;
-    handle->ledc_timer.timer_num = handle->config.ledc_timer_sel;
-    uint32_t freq = (APB_CLK_FREQ / (1 << handle->ledc_timer.duty_resolution));
-    handle->ledc_timer.freq_hz = freq - (freq % 1000); // fixed PWM frequency ,It's a multiple of 1000
-    res = ledc_timer_config(&handle->ledc_timer);
-    PWM_AUDIO_CHECK(res == ESP_OK, PWM_AUDIO_PARAM_ERROR, ESP_ERR_INVALID_ARG);
+    handle->framerate = rate;
+    handle->bits_per_sample = bits;
+    handle->channel_set_mask = (ch == 1 ? 0x00000001 : 0x00000003);
 
     /* Select and initialize basic parameters of the timer */
     timer_config_t config = {0};
@@ -458,10 +553,10 @@ esp_err_t pwm_audio_set_param(int rate, ledc_timer_bit_t bits, int ch)
     timer_set_counter_value(handle->config.tg_num, handle->config.timer_num, 0x00000000ULL);
 
     /* Configure the alarm value and the interrupt on alarm. */
-    timer_set_alarm_value(handle->config.tg_num, handle->config.timer_num, (TIMER_BASE_CLK / config.divider) / handle->config.framerate);
+    timer_set_alarm_value(handle->config.tg_num, handle->config.timer_num, (TIMER_BASE_CLK / config.divider) / handle->framerate);
     timer_enable_intr(handle->config.tg_num, handle->config.timer_num);
     timer_isr_register(handle->config.tg_num, handle->config.timer_num, timer_group_isr, NULL, ESP_INTR_FLAG_IRAM, NULL);
-    return ESP_OK;
+    return res;
 }
 
 esp_err_t pwm_audio_set_sample_rate(int rate)
@@ -471,13 +566,13 @@ esp_err_t pwm_audio_set_sample_rate(int rate)
     PWM_AUDIO_CHECK(rate <= SAMPLE_RATE_MAX && rate >= SAMPLE_RATE_MIN, PWM_AUDIO_FRAMERATE_ERROR, ESP_ERR_INVALID_ARG);
 
     pwm_audio_handle_t handle = g_pwm_audio_handle;
-    handle->config.framerate = rate;
+    handle->framerate = rate;
     uint16_t div = (uint16_t)handle->timg_dev->hw_timer[handle->config.timer_num].config.divider;
-    res = timer_set_alarm_value(handle->config.tg_num, handle->config.timer_num, (TIMER_BASE_CLK / div) / handle->config.framerate);
+    res = timer_set_alarm_value(handle->config.tg_num, handle->config.timer_num, (TIMER_BASE_CLK / div) / handle->framerate);
     return res;
 }
 
-esp_err_t pwm_audio_write(char *inbuf, size_t len, size_t *bytes_written, TickType_t ticks_to_wait)
+esp_err_t pwm_audio_write(uint8_t *inbuf, size_t len, size_t *bytes_written, TickType_t ticks_to_wait)
 {
     esp_err_t res;
     pwm_audio_handle_t handle = g_pwm_audio_handle;
@@ -494,6 +589,7 @@ esp_err_t pwm_audio_start(void)
     PWM_AUDIO_CHECK(handle->status == PWM_AUDIO_STATUS_IDLE, PWM_AUDIO_STATUS_ERROR, ESP_ERR_INVALID_STATE);
 
     handle->status = PWM_AUDIO_STATUS_BUSY;
+    
     timer_enable_intr(handle->config.tg_num, handle->config.timer_num);
     res = timer_start(handle->config.tg_num, handle->config.timer_num);
     return res;
@@ -502,9 +598,11 @@ esp_err_t pwm_audio_start(void)
 esp_err_t pwm_audio_stop(void)
 {
     pwm_audio_handle_t handle = g_pwm_audio_handle;
+
+    /**< just disable timer ,keep pwm output to reduce switching nosie */
     timer_pause(handle->config.tg_num, handle->config.timer_num);
     timer_disable_intr(handle->config.tg_num, handle->config.timer_num);
-    /**< just disable timer ,keep pwm output to reduce switching nosie */
+    rb_flush(handle->ringbuf);  /**< flush ringbuf, avoid play noise */
     handle->status = PWM_AUDIO_STATUS_IDLE;
     return ESP_OK;
 }
@@ -521,6 +619,7 @@ esp_err_t pwm_audio_deinit(void)
             ledc_stop(handle->ledc_channel[i].speed_mode, handle->ledc_channel[i].channel, 0);
         }
     }
+    /**< set the channel gpios input mode */
     for (size_t i = 0; i < PWM_AUDIO_CH_MAX; i++) {
         if (handle->ledc_channel[i].gpio_num >= 0) {
             gpio_set_direction(handle->ledc_channel[i].gpio_num, GPIO_MODE_INPUT);

@@ -1,3 +1,17 @@
+// Copyright 2015-2016 Espressif Systems (Shanghai) PTE LTD
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 
 #ifndef _PWM_AUDIO_H_
 #define _PWM_AUDIO_H_
@@ -19,14 +33,13 @@ typedef struct
 {
     timer_group_t tg_num;             /*!< timer group number (0 - 1) */
     timer_idx_t timer_num;            /*!< timer number  (0 - 1) */
-    int32_t framerate;                /*!< frame rates in Hz */
-    ledc_timer_bit_t bits_per_sample; /*!< bits per sample (8 - 10) */
 
     int gpio_num_left;                  /*!< the LEDC output gpio_num, Left channel */
     int gpio_num_right;                  /*!< the LEDC output gpio_num, Right channel */
     ledc_channel_t ledc_channel_left;   /*!< LEDC channel (0 - 7), Corresponding to left channel*/
     ledc_channel_t ledc_channel_right;   /*!< LEDC channel (0 - 7), Corresponding to right channel*/
-    ledc_timer_t ledc_timer_sel;   /*!< Select the timer source of channel (0 - 3) */
+    ledc_timer_t ledc_timer_sel;         /*!< Select the timer source of channel (0 - 3) */
+    ledc_timer_bit_t duty_resolution;   /*!< ledc pwm bits */
 
     uint32_t ringbuf_len;            /*!< ringbuffer size */
 
@@ -85,7 +98,7 @@ esp_err_t pwm_audio_start(void);
  * @return
  *     - ESP_OK Success
  */
-esp_err_t pwm_audio_write(char *inbuf, size_t len, size_t *bytes_written, TickType_t ticks_to_wait);
+esp_err_t pwm_audio_write(uint8_t *inbuf, size_t len, size_t *bytes_written, TickType_t ticks_to_wait);
 
 /**
  * @brief stop audio play

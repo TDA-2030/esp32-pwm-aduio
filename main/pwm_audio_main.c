@@ -26,6 +26,7 @@ static const char *TAG = "pwm_audio";
 char *wave_array;
 uint32_t wave_size;
 uint32_t wave_framerate;
+uint32_t wave_bits;
 
 #include "math.h"
 #include "stdio.h"
@@ -51,8 +52,7 @@ static void sin_test_task(void *arg)
     }
 
     pwm_audio_config_t pac;
-    pac.framerate          = CONFIG_AUDIO_SAMPLE_RATE;
-    pac.bits_per_sample    = LEDC_TIMER_8_BIT;
+    pac.duty_resolution    = LEDC_TIMER_8_BIT;
     pac.gpio_num_left      = CONFIG_LEFT_CHANNEL_GPIO;
     pac.ledc_channel_left  = LEDC_CHANNEL_0;
     pac.gpio_num_right     = -1;
@@ -60,7 +60,7 @@ static void sin_test_task(void *arg)
     pac.ledc_timer_sel     = LEDC_TIMER_0;
     pac.tg_num             = TIMER_GROUP_0;
     pac.timer_num          = TIMER_0;
-    pac.ringbuf_len        = 6000;
+    pac.ringbuf_len        = 1024*8;
     pwm_audio_init(&pac);
     gpio_config_t io_conf;
     //disable interrupt
@@ -75,7 +75,7 @@ static void sin_test_task(void *arg)
     io_conf.pull_up_en = 0;
     //configure GPIO with the given settings
     gpio_config(&io_conf);
-    pwm_audio_set_param(48000, 8, 2);
+    pwm_audio_set_param(48000, 8, 1);
     pwm_audio_start();
     while (1)
     {
@@ -84,7 +84,7 @@ static void sin_test_task(void *arg)
                 block_w = size - index;
             }
 
-            pwm_audio_write(( char *)buf + index, block_w, &cnt, 500);
+            pwm_audio_write(( uint8_t *)buf + index, block_w, &cnt, 500);
             index += cnt;
         } else {
 
@@ -103,10 +103,10 @@ static void pwm_audio_task(void *arg)
     wave_array     = wave_get();
     wave_size      = wave_get_size();
     wave_framerate = wave_get_framerate();
+    wave_bits      = wave_get_bits();
 
     pwm_audio_config_t pac;
-    pac.framerate          = CONFIG_AUDIO_SAMPLE_RATE;
-    pac.bits_per_sample    = LEDC_TIMER_8_BIT;
+    pac.duty_resolution    = LEDC_TIMER_8_BIT;
     pac.gpio_num_left      = CONFIG_LEFT_CHANNEL_GPIO;
     pac.ledc_channel_left  = LEDC_CHANNEL_0;
     pac.gpio_num_right     = CONFIG_RIGHT_CHANNEL_GPIO;
@@ -114,7 +114,7 @@ static void pwm_audio_task(void *arg)
     pac.ledc_timer_sel     = LEDC_TIMER_0;
     pac.tg_num             = TIMER_GROUP_0;
     pac.timer_num          = TIMER_0;
-    pac.ringbuf_len        = 6000;
+    pac.ringbuf_len        = 1024*8;
     pwm_audio_init(&pac);
     gpio_config_t io_conf;
     //disable interrupt
@@ -132,9 +132,9 @@ static void pwm_audio_task(void *arg)
 
     uint32_t index = 0;
     size_t cnt;
-    uint32_t block_w = 800;
-    ESP_LOGI(TAG, "play init count");
-    pwm_audio_set_param(wave_framerate, 8, 2);
+    uint32_t block_w = 2000;
+    ESP_LOGI(TAG, "play init");
+    pwm_audio_set_param(wave_framerate, wave_bits, 1);
     pwm_audio_start();
 
     while (1) {
@@ -142,24 +142,26 @@ static void pwm_audio_task(void *arg)
             if ((wave_size - index) < block_w) {
                 block_w = wave_size - index;
             }
-            pwm_audio_write(( char *)wave_array + index, block_w, &cnt, 500);
+            pwm_audio_write(( uint8_t *)wave_array + index, block_w, &cnt, 500);
+            // ESP_LOGI(TAG, "write [%d] [%d]", block_w, cnt);
             index += cnt;
         } else {
 
             ESP_LOGW(TAG, "play completed");
 #ifdef REPEAT_PLAY
             index = 0;
-            block_w = 800;
+            block_w = 2000;
             pwm_audio_stop();
-            vTaskDelay(1000 / portTICK_PERIOD_MS);
+            vTaskDelay(2500 / portTICK_PERIOD_MS);
             pwm_audio_start();
+            ESP_LOGW(TAG, "play start");
 #else
             pwm_audio_stop();
             vTaskDelay(portMAX_DELAY);
 #endif
         }
 
-        //vTaskDelay(20 / portTICK_PERIOD_MS);
+        vTaskDelay(10 / portTICK_PERIOD_MS);
     }
 }
     
