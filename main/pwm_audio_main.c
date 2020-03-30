@@ -150,6 +150,9 @@ static void pwm_audio_task(void *arg)
 #ifdef REPEAT_PLAY
             index = 0;
             block_w = 800;
+            pwm_audio_stop();
+            vTaskDelay(1000 / portTICK_PERIOD_MS);
+            pwm_audio_start();
 #else
             pwm_audio_stop();
             vTaskDelay(portMAX_DELAY);

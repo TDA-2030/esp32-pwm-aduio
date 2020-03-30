@@ -302,7 +302,7 @@ static void IRAM_ATTR timer_group_isr(void *para)
                 /**< set the PWM duty */
                 ledc_set_duty_fast(handle->ledc_channel[CHANNEL_LEFT_INDEX].speed_mode, handle->ledc_channel[CHANNEL_LEFT_INDEX].channel, value);
             }
-        } else {GPIO.out_w1ts=0x8000;
+        } else {/**< spend 1.04us */GPIO.out_w1ts=0x8000;
             if (ESP_OK == rb_read_byte(handle->ringbuf, &wave_h)) {
                 wave_h += 0x80; /**< offset */
                 /**< set the PWM duty */
@@ -334,7 +334,7 @@ static void IRAM_ATTR timer_group_isr(void *para)
      * Send semaphore when buffer is less than minimum
      */
     if (rb_get_free(handle->ringbuf) > BUFFER_MIN_SIZE) {
-        /**< 2.71us */
+        /**< spend 2.71us */
         BaseType_t xHigherPriorityTaskWoken;
         xSemaphoreGiveFromISR(handle->ringbuf->semaphore_rb, &xHigherPriorityTaskWoken);
         if (pdFALSE != xHigherPriorityTaskWoken) {
@@ -477,6 +477,16 @@ esp_err_t pwm_audio_set_sample_rate(int rate)
     return res;
 }
 
+esp_err_t pwm_audio_write(char *inbuf, size_t len, size_t *bytes_written, TickType_t ticks_to_wait)
+{
+    esp_err_t res;
+    pwm_audio_handle_t handle = g_pwm_audio_handle;
+    PWM_AUDIO_CHECK(inbuf != NULL && bytes_written != NULL && len != 0, PWM_AUDIO_PARAM_ADDR_ERROR, ESP_ERR_INVALID_ARG);
+
+    res = rb_write(handle->ringbuf, inbuf, len, bytes_written, ticks_to_wait);
+    return res;
+}
+
 esp_err_t pwm_audio_start(void)
 {
     esp_err_t res;
@@ -489,28 +499,12 @@ esp_err_t pwm_audio_start(void)
     return res;
 }
 
-esp_err_t pwm_audio_write(char *inbuf, size_t len, size_t *bytes_written, TickType_t ticks_to_wait)
-{
-    esp_err_t res;
-    pwm_audio_handle_t handle = g_pwm_audio_handle;
-    PWM_AUDIO_CHECK(inbuf != NULL && bytes_written != NULL && len != 0, PWM_AUDIO_PARAM_ADDR_ERROR, ESP_ERR_INVALID_ARG);
-
-    res = rb_write(handle->ringbuf, inbuf, len, bytes_written, ticks_to_wait);
-    return res;
-}
-
 esp_err_t pwm_audio_stop(void)
 {
     pwm_audio_handle_t handle = g_pwm_audio_handle;
     timer_pause(handle->config.tg_num, handle->config.timer_num);
     timer_disable_intr(handle->config.tg_num, handle->config.timer_num);
-
-    for (size_t i = 0; i < PWM_AUDIO_CH_MAX; i++) {
-        if (handle->ledc_channel[i].gpio_num >= 0) {
-            ledc_timer_rst(handle->ledc_channel[i].speed_mode, handle->ledc_channel[i].channel);
-        }
-    }
-
+    /**< just disable timer ,keep pwm output to reduce switching nosie */
     handle->status = PWM_AUDIO_STATUS_IDLE;
     return ESP_OK;
 }
@@ -522,7 +516,11 @@ esp_err_t pwm_audio_deinit(void)
 
     handle->status = PWM_AUDIO_STATUS_UN_INIT;
     pwm_audio_stop();
-
+    for (size_t i = 0; i < PWM_AUDIO_CH_MAX; i++) {
+        if (handle->ledc_channel[i].gpio_num >= 0) {
+            ledc_stop(handle->ledc_channel[i].speed_mode, handle->ledc_channel[i].channel, 0);
+        }
+    }
     for (size_t i = 0; i < PWM_AUDIO_CH_MAX; i++) {
         if (handle->ledc_channel[i].gpio_num >= 0) {
             gpio_set_direction(handle->ledc_channel[i].gpio_num, GPIO_MODE_INPUT);
