@@ -12,4 +12,6 @@ uint32_t wave_get_framerate(void);
 
 uint32_t wave_get_bits(void);
 
+uint32_t wave_get_ch(void);
+
 #endif

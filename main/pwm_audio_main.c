@@ -27,6 +27,8 @@ char *wave_array;
 uint32_t wave_size;
 uint32_t wave_framerate;
 uint32_t wave_bits;
+uint32_t wave_ch;
+
 
 #include "math.h"
 #include "stdio.h"
@@ -40,14 +42,14 @@ static void sin_test_task(void *arg)
     uint32_t block_w = 256;
 
     buf = malloc(size);
-    if(buf == NULL)
-    {
+
+    if (buf == NULL) {
         ESP_LOGE(TAG, "malloc error");
         vTaskDelay(portMAX_DELAY);
     }
-    for (size_t i = 0; i < size; i++)
-    {
-        buf[i]=127.8f*sinf(PI_2*(float)i/(float)size);
+
+    for (size_t i = 0; i < size; i++) {
+        buf[i] = 127.8f * sinf(PI_2 * (float)i / (float)size);
         printf("sin%d = %d\n", i, buf[i]);
     }
 
@@ -60,7 +62,7 @@ static void sin_test_task(void *arg)
     pac.ledc_timer_sel     = LEDC_TIMER_0;
     pac.tg_num             = TIMER_GROUP_0;
     pac.timer_num          = TIMER_0;
-    pac.ringbuf_len        = 1024*8;
+    pac.ringbuf_len        = 1024 * 8;
     pwm_audio_init(&pac);
     gpio_config_t io_conf;
     //disable interrupt
@@ -68,7 +70,7 @@ static void sin_test_task(void *arg)
     //set as output mode
     io_conf.mode = GPIO_MODE_OUTPUT;
     //bit mask of the pins that you want to set,e.g.GPIO18/19
-    io_conf.pin_bit_mask = 1<<15UL;
+    io_conf.pin_bit_mask = 1 << 15UL;
     //disable pull-down mode
     io_conf.pull_down_en = 0;
     //disable pull-up mode
@@ -77,14 +79,14 @@ static void sin_test_task(void *arg)
     gpio_config(&io_conf);
     pwm_audio_set_param(48000, 8, 1);
     pwm_audio_start();
-    while (1)
-    {
+
+    while (1) {
         if (index < size) {
             if ((size - index) < block_w) {
                 block_w = size - index;
             }
 
-            pwm_audio_write(( uint8_t *)buf + index, block_w, &cnt, 500);
+            pwm_audio_write((uint8_t *)buf + index, block_w, &cnt, 500);
             index += cnt;
         } else {
 
@@ -104,6 +106,7 @@ static void pwm_audio_task(void *arg)
     wave_size      = wave_get_size();
     wave_framerate = wave_get_framerate();
     wave_bits      = wave_get_bits();
+    wave_ch        = wave_get_ch();
 
     pwm_audio_config_t pac;
     pac.duty_resolution    = LEDC_TIMER_8_BIT;
@@ -114,7 +117,7 @@ static void pwm_audio_task(void *arg)
     pac.ledc_timer_sel     = LEDC_TIMER_0;
     pac.tg_num             = TIMER_GROUP_0;
     pac.timer_num          = TIMER_0;
-    pac.ringbuf_len        = 1024*8;
+    pac.ringbuf_len        = 1024 * 8;
     pwm_audio_init(&pac);
     gpio_config_t io_conf;
     //disable interrupt
@@ -122,7 +125,7 @@ static void pwm_audio_task(void *arg)
     //set as output mode
     io_conf.mode = GPIO_MODE_OUTPUT;
     //bit mask of the pins that you want to set,e.g.GPIO18/19
-    io_conf.pin_bit_mask = 1<<15UL;
+    io_conf.pin_bit_mask = 1 << 15UL;
     //disable pull-down mode
     io_conf.pull_down_en = 0;
     //disable pull-up mode
@@ -132,9 +135,9 @@ static void pwm_audio_task(void *arg)
 
     uint32_t index = 0;
     size_t cnt;
-    uint32_t block_w = 2000;
+    uint32_t block_w = 2048;
     ESP_LOGI(TAG, "play init");
-    pwm_audio_set_param(wave_framerate, wave_bits, 1);
+    pwm_audio_set_param(wave_framerate, wave_bits, wave_ch);
     pwm_audio_start();
 
     while (1) {
@@ -142,15 +145,16 @@ static void pwm_audio_task(void *arg)
             if ((wave_size - index) < block_w) {
                 block_w = wave_size - index;
             }
-            pwm_audio_write(( uint8_t *)wave_array + index, block_w, &cnt, 500);
-            // ESP_LOGI(TAG, "write [%d] [%d]", block_w, cnt);
+
+            pwm_audio_write((uint8_t *)wave_array + index, block_w, &cnt, 5000 / portTICK_PERIOD_MS);
+            ESP_LOGI(TAG, "write [%d] [%d]", block_w, cnt);
             index += cnt;
         } else {
 
             ESP_LOGW(TAG, "play completed");
 #ifdef REPEAT_PLAY
             index = 0;
-            block_w = 2000;
+            block_w = 2048;
             pwm_audio_stop();
             vTaskDelay(2500 / portTICK_PERIOD_MS);
             pwm_audio_start();
@@ -160,11 +164,10 @@ static void pwm_audio_task(void *arg)
             vTaskDelay(portMAX_DELAY);
 #endif
         }
-
-        vTaskDelay(10 / portTICK_PERIOD_MS);
+        vTaskDelay(4 / portTICK_PERIOD_MS);
     }
 }
-    
+
 
 void app_main(void)
 {
