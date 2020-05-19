@@ -26,8 +26,8 @@
 #include "soc/timer_group_struct.h"
 #include "soc/ledc_struct.h"
 #include "soc/ledc_reg.h"
-#include "hal/gpio_ll.h"
-#include "soc/timer_group_caps.h"
+// #include "hal/gpio_ll.h"
+// #include "soc/timer_group_caps.h"
 #include "pwm_audio.h"
 #include "sdkconfig.h"
 
@@ -36,15 +36,6 @@
 #error No defined idf target esp32 or esp32s2
 #endif
 #endif
-
-
-#ifdef CONFIG_IDF_TARGET_ESP32S2
-#include "esp32s2/rom/ets_sys.h"
-#endif /**< CONFIG_IDF_TARGET_ESP32S2 */
-#ifdef CONFIG_IDF_TARGET_ESP32
-#include "esp32/rom/ets_sys.h"
-#endif /**< CONFIG_IDF_TARGET_ESP32 */
-
 
 
 static const char *TAG = "pwm_audio";
@@ -65,14 +56,18 @@ static const char *PWM_AUDIO_TIMER_NUM_ERROR  = "PWM AUDIO TIMER NUMBER ERROR";
 static const char *PWM_AUDIO_ALLOC_ERROR      = "PWM AUDIO ALLOC ERROR";
 static const char *PWM_AUDIO_RESOLUTION_ERROR = "PWM AUDIO RESOLUTION ERROR";
 
-#define BUFFER_MIN_SIZE (256UL)
-#define SAMPLE_RATE_MAX (48000)
-#define SAMPLE_RATE_MIN (8000)
+#define BUFFER_MIN_SIZE     (256UL)
+#define SAMPLE_RATE_MAX     (48000)
+#define SAMPLE_RATE_MIN     (8000)
 #define CHANNEL_LEFT_INDEX  (0)
 #define CHANNEL_RIGHT_INDEX (1)
 #define CHANNEL_LEFT_MASK   (0x01)
 #define CHANNEL_RIGHT_MASK  (0x02)
+#define VOLUME_0DB          (16)
 
+
+/**<  */
+#define ISR_DEBUG 1
 
 typedef struct {
     char *buf;                         /**< Original pointer */
@@ -95,6 +90,7 @@ typedef struct {
     uint32_t              channel_set_num;                 /**< channel audio set number */
     int32_t               framerate;                       /*!< frame rates in Hz */
     int32_t               bits_per_sample;                 /*!< bits per sample (8, 16, 32) */
+    int32_t               volume;                          /*!< the volume(0 ~ 2*VOLUME_0DB) */
 
     pwm_audio_status_t status;
 } pwm_audio_handle;
@@ -132,7 +128,7 @@ static esp_err_t rb_destroy(ringbuf_handle_t rb)
     rb = NULL;
     return ESP_OK;
 }
-static ringbuf_handle_t rb_create(int size)
+static ringbuf_handle_t rb_create(uint32_t size)
 {
     if (size < (BUFFER_MIN_SIZE << 2)) {
         ESP_LOGE(TAG, "Invalid buffer size, Minimum = %d", (int32_t)(BUFFER_MIN_SIZE << 2));
@@ -300,20 +296,24 @@ static void IRAM_ATTR timer_group_isr(void *para)
 
     static uint8_t wave_h, wave_l;
     static uint16_t value;
+    ringbuf_handle_t rb = handle->ringbuf;
+#if (1==ISR_DEBUG)
+    GPIO.out_w1ts = 0x8000;
+#endif
 
     /**
      * It is believed that the channel configured with GPIO needs to output sound
     */
     if (handle->channel_mask & CHANNEL_LEFT_MASK) {
         if (handle->config.duty_resolution > 8) {
-            rb_read_byte(handle->ringbuf, &wave_l);
-
-            if (ESP_OK == rb_read_byte(handle->ringbuf, &wave_h)) {
+            if (rb_get_count(rb) > 1) {
+                rb_read_byte(rb, &wave_l);
+                rb_read_byte(rb, &wave_h);
                 value = ((wave_h << 8) | wave_l);
                 ledc_set_left_duty_fast(value);/**< set the PWM duty */
             }
         } else {
-            if (ESP_OK == rb_read_byte(handle->ringbuf, &wave_h)) {
+            if (ESP_OK == rb_read_byte(rb, &wave_h)) {
                 ledc_set_left_duty_fast(wave_h);/**< set the PWM duty */
             }
         }
@@ -332,14 +332,14 @@ static void IRAM_ATTR timer_group_isr(void *para)
             }
         } else {
             if (handle->config.duty_resolution > 8) {
-                rb_read_byte(handle->ringbuf, &wave_l);
-
-                if (ESP_OK == rb_read_byte(handle->ringbuf, &wave_h)) {
+                if (rb_get_count(rb) > 1) {
+                    rb_read_byte(rb, &wave_l);
+                    rb_read_byte(rb, &wave_h);
                     value = ((wave_h << 8) | wave_l);
                     ledc_set_right_duty_fast(value);/**< set the PWM duty */
                 }
             } else {
-                if (ESP_OK == rb_read_byte(handle->ringbuf, &wave_h)) {
+                if (ESP_OK == rb_read_byte(rb, &wave_h)) {
                     ledc_set_right_duty_fast(wave_h);/**< set the PWM duty */
                 }
             }
@@ -351,24 +351,30 @@ static void IRAM_ATTR timer_group_isr(void *para)
              * Read buffer but do nothing
              */
             if (handle->config.duty_resolution > 8) {
-                rb_read_byte(handle->ringbuf, &wave_h);
-                rb_read_byte(handle->ringbuf, &wave_h);
+                if (rb_get_count(rb) > 1) {
+                    rb_read_byte(rb, &wave_h);
+                    rb_read_byte(rb, &wave_h);
+                }
             } else {
-                rb_read_byte(handle->ringbuf, &wave_h);
+                rb_read_byte(rb, &wave_h);
             }
 
-            rb_read_byte(handle->ringbuf, &wave_l);
+            rb_read_byte(rb, &wave_l);
         }
     }
+
+#if (1==ISR_DEBUG)
+    GPIO.out_w1tc = 0x8000;
+#endif
 
     /**
      * Send semaphore when buffer free is more than BUFFER_MIN_SIZE
      */
-    if (0 == handle->ringbuf->is_give && rb_get_free(handle->ringbuf) > BUFFER_MIN_SIZE) {
+    if (0 == rb->is_give && rb_get_free(rb) > BUFFER_MIN_SIZE) {
         /**< The execution time of the following code is 2.71 microsecond */
-        handle->ringbuf->is_give = 1; /**< To prevent multiple give semaphores */
+        rb->is_give = 1; /**< To prevent multiple give semaphores */
         BaseType_t xHigherPriorityTaskWoken;
-        xSemaphoreGiveFromISR(handle->ringbuf->semaphore_rb, &xHigherPriorityTaskWoken);
+        xSemaphoreGiveFromISR(rb->semaphore_rb, &xHigherPriorityTaskWoken);
 
         if (pdFALSE != xHigherPriorityTaskWoken) {
             portYIELD_FROM_ISR();
@@ -380,6 +386,25 @@ esp_err_t pwm_audio_get_status(pwm_audio_status_t *status)
 {
     pwm_audio_handle_t handle = g_pwm_audio_handle;
     *status = handle->status;
+    return ESP_OK;
+}
+
+esp_err_t pwm_audio_get_param(int *rate, int *bits, int *ch)
+{
+    pwm_audio_handle_t handle = g_pwm_audio_handle;
+
+    if (NULL != rate) {
+        *rate = handle->framerate;
+    }
+
+    if (NULL != bits) {
+        *bits = (int)handle->bits_per_sample;
+    }
+
+    if (NULL != ch) {
+        *ch = handle->channel_set_num;
+    }
+
     return ESP_OK;
 }
 
@@ -531,7 +556,21 @@ esp_err_t pwm_audio_set_sample_rate(int rate)
     return res;
 }
 
-esp_err_t pwm_audio_write(uint8_t *inbuf, size_t inbuf_len, size_t *bytes_written, TickType_t ticks_to_wait)
+esp_err_t pwm_audio_set_volume(int8_t volume)
+{
+
+    if (volume < 0) {
+        PWM_AUDIO_CHECK(-volume <= VOLUME_0DB, PWM_AUDIO_PARAM_ERROR, ESP_ERR_INVALID_ARG);
+    } else {
+        PWM_AUDIO_CHECK(volume <= VOLUME_0DB, PWM_AUDIO_PARAM_ERROR, ESP_ERR_INVALID_ARG);
+    }
+
+    pwm_audio_handle_t handle = g_pwm_audio_handle;
+    handle->volume = volume + VOLUME_0DB;
+    return ESP_OK;
+}
+
+esp_err_t IRAM_ATTR pwm_audio_write(uint8_t *inbuf, size_t inbuf_len, size_t *bytes_written, TickType_t ticks_to_wait)
 {
     esp_err_t res = ESP_OK;
     pwm_audio_handle_t handle = g_pwm_audio_handle;
@@ -571,7 +610,7 @@ esp_err_t pwm_audio_write(uint8_t *inbuf, size_t inbuf_len, size_t *bytes_writte
                         bytes_can_write >>= 1;
 
                         for (size_t i = 0; i < len; i++) {
-                            temp = inbuf[i] + 0x7f; /**< offset */
+                            temp = (inbuf[i] * handle->volume / VOLUME_0DB) + 0x7f; /**< offset */
                             value = temp << shift;
                             rb_write_byte(rb, value);
                             rb_write_byte(rb, value >> 8);
@@ -580,7 +619,7 @@ esp_err_t pwm_audio_write(uint8_t *inbuf, size_t inbuf_len, size_t *bytes_writte
                         uint8_t value;
 
                         for (size_t i = 0; i < len; i++) {
-                            value = inbuf[i] + 0x7f; /**< offset */
+                            value = (inbuf[i] * handle->volume / VOLUME_0DB) + 0x7f; /**< offset */
                             rb_write_byte(rb, value);
                         }
                     }
@@ -590,16 +629,17 @@ esp_err_t pwm_audio_write(uint8_t *inbuf, size_t inbuf_len, size_t *bytes_writte
                 case 16: {
                     len >>= 1;
                     uint16_t *buf_16b = (uint16_t *)inbuf;
-                    uint16_t value;
+                    static uint16_t value_16b;
                     int16_t temp;
 
                     if (handle->config.duty_resolution > 8) {
                         for (size_t i = 0; i < len; i++) {
                             temp = buf_16b[i];
-                            value = temp + 0x7fff; /**< offset */
-                            value >>= shift;
-                            rb_write_byte(rb, value);
-                            rb_write_byte(rb, value >> 8);
+                            temp = temp * handle->volume / VOLUME_0DB;
+                            value_16b = temp + 0x7fff; /**< offset */
+                            value_16b >>= shift;
+                            rb_write_byte(rb, value_16b);
+                            rb_write_byte(rb, value_16b >> 8);
                         }
                     } else {
                         /**
@@ -607,9 +647,10 @@ esp_err_t pwm_audio_write(uint8_t *inbuf, size_t inbuf_len, size_t *bytes_writte
                          */
                         for (size_t i = 0; i < len; i++) {
                             temp = buf_16b[i];
-                            value = temp + 0x7fff; /**< offset */
-                            value >>= shift;
-                            rb_write_byte(rb, value);
+                            temp = temp * handle->volume / VOLUME_0DB;
+                            value_16b = temp + 0x7fff; /**< offset */
+                            value_16b >>= shift;
+                            rb_write_byte(rb, value_16b);
                         }
                     }
                 }
@@ -624,6 +665,7 @@ esp_err_t pwm_audio_write(uint8_t *inbuf, size_t inbuf_len, size_t *bytes_writte
                     if (handle->config.duty_resolution > 8) {
                         for (size_t i = 0; i < len; i++) {
                             temp = buf_32b[i];
+                            temp = temp * handle->volume / VOLUME_0DB;
                             value = temp + 0x7fffffff; /**< offset */
                             value >>= shift;
                             rb_write_byte(rb, value);
@@ -635,6 +677,7 @@ esp_err_t pwm_audio_write(uint8_t *inbuf, size_t inbuf_len, size_t *bytes_writte
                          */
                         for (size_t i = 0; i < len; i++) {
                             temp = buf_32b[i];
+                            temp = temp * handle->volume / VOLUME_0DB;
                             value = temp + 0x7fffffff; /**< offset */
                             value >>= shift;
                             rb_write_byte(rb, value);

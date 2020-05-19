@@ -122,10 +122,8 @@ esp_err_t pwm_audio_deinit(void);
  * Similar to pwm_audio_set_sample_rate(), but also sets bit width.
  *
  * @param rate sample rate (ex: 8000, 44100...)
- *
- * @param bits bit width (MUST BE 8Bits)
- *
- * @param ch channel, (see pwm_audio_channel_t)
+ * @param bits bit width
+ * @param ch channel number
  *
  * @return
  *     - ESP_OK              Success
@@ -143,6 +141,33 @@ esp_err_t pwm_audio_set_param(int rate, ledc_timer_bit_t bits, int ch);
  *     - ESP_ERR_INVALID_ARG Parameter error
  */
 esp_err_t pwm_audio_set_sample_rate(int rate);
+
+/**
+ * @brief Set volume for pwm audio.
+ *
+ * @param volume Volume to set (-16 ~ 16), see Macro VOLUME_0DB
+ *        Set to 0 for original output;
+ *        Set to -16 for mute;
+ *        Set to 16 for double output
+ *
+ * @return
+ *     - ESP_OK              Success
+ *     - ESP_ERR_INVALID_ARG Parameter error
+ */
+esp_err_t pwm_audio_set_volume(int8_t volume);
+
+/**
+ * @brief Get parameter for pwm audio.
+ *
+ * @param rate sample rate
+ * @param bits bit width
+ * @param ch channel number
+ *
+ * @return
+ *     - ESP_OK              Success
+ *     - ESP_ERR_INVALID_ARG Parameter error
+ */
+esp_err_t pwm_audio_get_param(int *rate, int *bits, int *ch);
 
 /**
  * @brief get pwm audio status

@@ -109,7 +109,7 @@ static void pwm_audio_task(void *arg)
     wave_ch        = wave_get_ch();
 
     pwm_audio_config_t pac;
-    pac.duty_resolution    = LEDC_TIMER_8_BIT;
+    pac.duty_resolution    = LEDC_TIMER_10_BIT;
     pac.gpio_num_left      = CONFIG_LEFT_CHANNEL_GPIO;
     pac.ledc_channel_left  = LEDC_CHANNEL_0;
     pac.gpio_num_right     = CONFIG_RIGHT_CHANNEL_GPIO;
@@ -139,6 +139,7 @@ static void pwm_audio_task(void *arg)
     ESP_LOGI(TAG, "play init");
     pwm_audio_set_param(wave_framerate, wave_bits, wave_ch);
     pwm_audio_start();
+    pwm_audio_set_volume(2);
 
     while (1) {
         if (index < wave_size) {
@@ -164,7 +165,7 @@ static void pwm_audio_task(void *arg)
             vTaskDelay(portMAX_DELAY);
 #endif
         }
-        vTaskDelay(4 / portTICK_PERIOD_MS);
+        vTaskDelay(6 / portTICK_PERIOD_MS);
     }
 }
 
@@ -173,8 +174,8 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "----------start------------");
 
-    // xTaskCreate(sin_test_task, "sin_test_task", 1024 * 3, NULL, 1, NULL);
-    xTaskCreate(pwm_audio_task, "pwm_audio_task", 1024 * 2, NULL, 1, NULL);
+    // xTaskCreate(sin_test_task, "sin_test_task", 1024 * 3, NULL, 5, NULL);
+    xTaskCreate(pwm_audio_task, "pwm_audio_task", 1024 * 3, NULL, 5, NULL);
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     static char *task_info = NULL;
     task_info = (char *)malloc(1024);
