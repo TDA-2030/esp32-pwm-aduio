@@ -66,9 +66,6 @@ static const char *PWM_AUDIO_RESOLUTION_ERROR = "PWM AUDIO RESOLUTION ERROR";
 #define VOLUME_0DB          (16)
 
 
-/**<  */
-#define ISR_DEBUG 1
-
 typedef struct {
     char *buf;                         /**< Original pointer */
     uint32_t volatile head;            /**< ending pointer */
@@ -106,6 +103,8 @@ static volatile uint32_t *g_ledc_right_duty_val  = NULL;
 
 /**< pwm audio handle pointer */
 static pwm_audio_handle_t g_pwm_audio_handle = NULL;
+
+static portMUX_TYPE timer_spinlock = portMUX_INITIALIZER_UNLOCKED;
 
 /**
  * Ringbuffer for pwm audio
@@ -578,6 +577,7 @@ esp_err_t IRAM_ATTR pwm_audio_write(uint8_t *inbuf, size_t inbuf_len, size_t *by
 
     *bytes_written = 0;
     ringbuf_handle_t rb = handle->ringbuf;
+    TickType_t start_ticks = xTaskGetTickCount();
 
     while (inbuf_len) {
         if (ESP_OK == rb_wait_semaphore(rb, ticks_to_wait)) {
@@ -697,6 +697,10 @@ esp_err_t IRAM_ATTR pwm_audio_write(uint8_t *inbuf, size_t inbuf_len, size_t *by
         } else {
             res = ESP_FAIL;
         }
+
+        if ((xTaskGetTickCount() - start_ticks) >= ticks_to_wait) {
+            return res;
+        }
     }
 
     return res;
@@ -710,7 +714,12 @@ esp_err_t pwm_audio_start(void)
 
     handle->status = PWM_AUDIO_STATUS_BUSY;
 
-    timer_enable_intr(handle->config.tg_num, handle->config.timer_num);
+    /**< timer enable interrupt */
+    portENTER_CRITICAL_SAFE(&timer_spinlock);
+    handle->timg_dev->int_ena.val |= BIT(handle->config.timer_num);
+    handle->timg_dev->hw_timer[handle->config.timer_num].config.level_int_en = 1;
+    portEXIT_CRITICAL_SAFE(&timer_spinlock);
+
     res = timer_start(handle->config.tg_num, handle->config.timer_num);
     return res;
 }
@@ -720,8 +729,13 @@ esp_err_t pwm_audio_stop(void)
     pwm_audio_handle_t handle = g_pwm_audio_handle;
 
     /**< just disable timer ,keep pwm output to reduce switching nosie */
-    timer_pause(handle->config.tg_num, handle->config.timer_num);
-    timer_disable_intr(handle->config.tg_num, handle->config.timer_num);
+    /**< timer disable interrupt */
+    portENTER_CRITICAL_SAFE(&timer_spinlock);
+    handle->timg_dev->int_ena.val &= (~BIT(handle->config.timer_num));
+    handle->timg_dev->hw_timer[handle->config.timer_num].config.level_int_en = 0;
+    portEXIT_CRITICAL_SAFE(&timer_spinlock);
+
+    // timer_pause(handle->config.tg_num, handle->config.timer_num);
     rb_flush(handle->ringbuf);  /**< flush ringbuf, avoid play noise */
     handle->status = PWM_AUDIO_STATUS_IDLE;
     return ESP_OK;
@@ -733,7 +747,8 @@ esp_err_t pwm_audio_deinit(void)
     PWM_AUDIO_CHECK(handle != NULL, PWM_AUDIO_PARAM_ADDR_ERROR, ESP_FAIL);
 
     handle->status = PWM_AUDIO_STATUS_UN_INIT;
-    pwm_audio_stop();
+    timer_pause(handle->config.tg_num, handle->config.timer_num);
+    timer_disable_intr(handle->config.tg_num, handle->config.timer_num);
 
     for (size_t i = 0; i < PWM_AUDIO_CH_MAX; i++) {
         if (handle->ledc_channel[i].gpio_num >= 0) {

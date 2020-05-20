@@ -3,14 +3,14 @@ menu "Example Configuration"
     config LEFT_CHANNEL_GPIO
         int "left channel GPIO number"
         range 0 34
-        default 17
+        default 25
         help
             GPIO number (IOxx) to output left channel audio.
 
     config RIGHT_CHANNEL_GPIO
         int "right channel GPIO number"
         range 0 34
-        default 18
+        default 26
         help
             GPIO number (IOxx) to output right channel audio.
 

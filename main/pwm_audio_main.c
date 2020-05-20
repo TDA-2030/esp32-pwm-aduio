@@ -119,6 +119,7 @@ static void pwm_audio_task(void *arg)
     pac.timer_num          = TIMER_0;
     pac.ringbuf_len        = 1024 * 8;
     pwm_audio_init(&pac);
+#if (1==ISR_DEBUG)
     gpio_config_t io_conf;
     //disable interrupt
     io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
@@ -132,6 +133,7 @@ static void pwm_audio_task(void *arg)
     io_conf.pull_up_en = 0;
     //configure GPIO with the given settings
     gpio_config(&io_conf);
+#endif
 
     uint32_t index = 0;
     size_t cnt;
@@ -139,7 +141,7 @@ static void pwm_audio_task(void *arg)
     ESP_LOGI(TAG, "play init");
     pwm_audio_set_param(wave_framerate, wave_bits, wave_ch);
     pwm_audio_start();
-    pwm_audio_set_volume(2);
+    pwm_audio_set_volume(0);
 
     while (1) {
         if (index < wave_size) {
@@ -165,6 +167,7 @@ static void pwm_audio_task(void *arg)
             vTaskDelay(portMAX_DELAY);
 #endif
         }
+
         vTaskDelay(6 / portTICK_PERIOD_MS);
     }
 }
@@ -173,6 +176,7 @@ static void pwm_audio_task(void *arg)
 void app_main(void)
 {
     ESP_LOGI(TAG, "----------start------------");
+    ESP_LOGI(TAG, "esp-idf version: %s", IDF_VER);
 
     // xTaskCreate(sin_test_task, "sin_test_task", 1024 * 3, NULL, 5, NULL);
     xTaskCreate(pwm_audio_task, "pwm_audio_task", 1024 * 3, NULL, 5, NULL);

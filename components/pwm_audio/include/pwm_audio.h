@@ -27,6 +27,15 @@ extern "C" {
 
 
 /**
+ * 
+ * Configuration 
+ * 
+ **/
+
+#define ISR_DEBUG 0   /**< INDEBUG SWITCH */
+
+
+/**
  * @brief Configuration parameters of pwm audio for pwm_audio_init function
  */
 typedef struct
@@ -143,12 +152,14 @@ esp_err_t pwm_audio_set_param(int rate, ledc_timer_bit_t bits, int ch);
 esp_err_t pwm_audio_set_sample_rate(int rate);
 
 /**
- * @brief Set volume for pwm audio.
+ * @brief Set volume for pwm audio. 
+ *        !!!Using volume greater than 0 may cause variable overflow and distortion!!!
+ *        Usually you should enter a volume less than or equal to 0
  *
  * @param volume Volume to set (-16 ~ 16), see Macro VOLUME_0DB
  *        Set to 0 for original output;
- *        Set to -16 for mute;
- *        Set to 16 for double output
+ *        Set to less then 0 for attenuation, and -16 is mute;
+ *        Set to more than 0 for enlarge, and 16 is double output
  *
  * @return
  *     - ESP_OK              Success
