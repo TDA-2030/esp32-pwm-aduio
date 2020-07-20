@@ -87,7 +87,7 @@ typedef struct {
     uint32_t              channel_set_num;                 /**< channel audio set number */
     int32_t               framerate;                       /*!< frame rates in Hz */
     int32_t               bits_per_sample;                 /*!< bits per sample (8, 16, 32) */
-    int32_t               volume;                          /*!< the volume(0 ~ 2*VOLUME_0DB) */
+    int32_t               volume;                          /*!< the volume(-VOLUME_0DB ~ VOLUME_0DB) */
 
     pwm_audio_status_t status;
 } pwm_audio_handle;

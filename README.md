@@ -17,8 +17,8 @@ Connect two speakers to the following LEDC channels / individual GPIOs:
 
 |ledc channel|GPIO|
 |:---:|:---:|
-|channel 0|GPIO17|
-|channel 1|GPIO18|
+|channel 0|GPIO25|
+|channel 1|GPIO26|
 
 
 ```
@@ -68,7 +68,6 @@ See the Getting Started Guide for full steps to configure and use ESP-IDF to bui
 ## Example Output
 
 * You will hear a piece of music again and again from the speakers
-* There is a phase difference between the two channels
 
 you can also see the following output log on the serial monitor:
 
@@ -94,5 +93,3 @@ the memory get: 298248
     - Speaker impedance may be too large. Replace it with a higher impedance one
 * The noise is too loud
     - A simple filter may be required
-
-For any technical queries, please open an [issue] (https://github.com/espressif/esp-idf/issues) on GitHub. We will get back to you soon.
