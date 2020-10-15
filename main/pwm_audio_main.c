@@ -64,19 +64,6 @@ static void sin_test_task(void *arg)
     pac.timer_num          = TIMER_0;
     pac.ringbuf_len        = 1024 * 8;
     pwm_audio_init(&pac);
-    gpio_config_t io_conf;
-    //disable interrupt
-    io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
-    //set as output mode
-    io_conf.mode = GPIO_MODE_OUTPUT;
-    //bit mask of the pins that you want to set,e.g.GPIO18/19
-    io_conf.pin_bit_mask = 1 << 15UL;
-    //disable pull-down mode
-    io_conf.pull_down_en = 0;
-    //disable pull-up mode
-    io_conf.pull_up_en = 0;
-    //configure GPIO with the given settings
-    gpio_config(&io_conf);
     pwm_audio_set_param(48000, 8, 1);
     pwm_audio_start();
 
@@ -119,21 +106,6 @@ static void pwm_audio_task(void *arg)
     pac.timer_num          = TIMER_0;
     pac.ringbuf_len        = 1024 * 8;
     pwm_audio_init(&pac);
-#if (1==ISR_DEBUG)
-    gpio_config_t io_conf;
-    //disable interrupt
-    io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
-    //set as output mode
-    io_conf.mode = GPIO_MODE_OUTPUT;
-    //bit mask of the pins that you want to set,e.g.GPIO18/19
-    io_conf.pin_bit_mask = 1 << 15UL;
-    //disable pull-down mode
-    io_conf.pull_down_en = 0;
-    //disable pull-up mode
-    io_conf.pull_up_en = 0;
-    //configure GPIO with the given settings
-    gpio_config(&io_conf);
-#endif
 
     uint32_t index = 0;
     size_t cnt;

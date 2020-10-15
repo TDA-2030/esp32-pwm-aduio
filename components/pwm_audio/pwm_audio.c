@@ -49,7 +49,6 @@ static const char *TAG = "pwm_audio";
     }
 
 static const char *PWM_AUDIO_PARAM_ADDR_ERROR = "PWM AUDIO PARAM ADDR ERROR";
-static const char *PWM_AUDIO_PARAM_ERROR      = "PWM AUDIO PARAM ERROR";
 static const char *PWM_AUDIO_FRAMERATE_ERROR  = "PWM AUDIO FRAMERATE ERROR";
 static const char *PWM_AUDIO_STATUS_ERROR     = "PWM AUDIO STATUS ERROR";
 static const char *PWM_AUDIO_TG_NUM_ERROR     = "PWM AUDIO TIMER GROUP NUMBER ERROR";
@@ -66,6 +65,11 @@ static const char *PWM_AUDIO_RESOLUTION_ERROR = "PWM AUDIO RESOLUTION ERROR";
 #define CHANNEL_RIGHT_MASK  (0x02)
 #define VOLUME_0DB          (16)
 
+/**
+ * Debug Configuration 
+ **/
+#define ISR_DEBUG 0  /**< INDEBUG SWITCH */
+#define ISR_DEBUG_IO_MASK 0x8000
 
 typedef struct {
     char *buf;                         /**< Original pointer */
@@ -297,7 +301,7 @@ static void IRAM_ATTR timer_group_isr(void *para)
     static uint16_t value;
     ringbuf_handle_t rb = handle->ringbuf;
 #if (1==ISR_DEBUG)
-    GPIO.out_w1ts = 0x8000;
+    GPIO.out_w1ts = ISR_DEBUG_IO_MASK;
 #endif
 
     /**
@@ -360,10 +364,6 @@ static void IRAM_ATTR timer_group_isr(void *para)
         }
     }
 
-#if (1==ISR_DEBUG)
-    GPIO.out_w1tc = 0x8000;
-#endif
-
     /**
      * Send semaphore when buffer free is more than BUFFER_MIN_SIZE
      */
@@ -377,6 +377,9 @@ static void IRAM_ATTR timer_group_isr(void *para)
             portYIELD_FROM_ISR();
         }
     }
+#if (1==ISR_DEBUG)
+    GPIO.out_w1tc = ISR_DEBUG_IO_MASK;
+#endif
 }
 
 esp_err_t pwm_audio_get_status(pwm_audio_status_t *status)
@@ -414,9 +417,9 @@ esp_err_t pwm_audio_init(const pwm_audio_config_t *cfg)
     PWM_AUDIO_CHECK(cfg->duty_resolution <= 10 && cfg->duty_resolution >= 8, PWM_AUDIO_RESOLUTION_ERROR, ESP_ERR_INVALID_ARG);
     PWM_AUDIO_CHECK(NULL == g_pwm_audio_handle, "Already initiate", ESP_ERR_INVALID_STATE);
 
-    ESP_LOGI(TAG, "timer: %d:%d | left io: %d | right io: %d | resolution: %dBIT", 
-                    cfg->tg_num, cfg->timer_num, cfg->gpio_num_left, cfg->gpio_num_right, cfg->duty_resolution);
-    
+    ESP_LOGI(TAG, "timer: %d:%d | left io: %d | right io: %d | resolution: %dBIT",
+             cfg->tg_num, cfg->timer_num, cfg->gpio_num_left, cfg->gpio_num_right, cfg->duty_resolution);
+
     pwm_audio_handle_t handle = NULL;
 
     handle = heap_caps_malloc(sizeof(pwm_audio_handle), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
@@ -428,16 +431,32 @@ esp_err_t pwm_audio_init(const pwm_audio_config_t *cfg)
 
     handle->config = *cfg;
     g_pwm_audio_handle = handle;
+#if (1==ISR_DEBUG)
+    gpio_config_t io_conf;
+    //disable interrupt
+    io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
+    //set as output mode
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    //bit mask of the pins that you want to set,e.g.GPIO18/19
+    io_conf.pin_bit_mask = ISR_DEBUG_IO_MASK;
+    //disable pull-down mode
+    io_conf.pull_down_en = 0;
+    //disable pull-up mode
+    io_conf.pull_up_en = 0;
+    //configure GPIO with the given settings
+    gpio_config(&io_conf);
+#endif
 
-    /**
-     * config ledc to generate pwm
-     */
+    /**< Get timer group register pointer */
     if (cfg->tg_num == TIMER_GROUP_0) {
         handle->timg_dev = &TIMERG0;
     } else {
         handle->timg_dev = &TIMERG1;
     }
 
+    /**
+     * config ledc to generate pwm
+     */
     handle->channel_mask = 0;
 
     if (handle->config.gpio_num_left >= 0) {
@@ -495,6 +514,23 @@ esp_err_t pwm_audio_init(const pwm_audio_config_t *cfg)
     g_ledc_right_conf1_val = &LEDC.channel_group[handle->ledc_timer.speed_mode].\
                              channel[handle->ledc_channel[CHANNEL_RIGHT_INDEX].channel].conf1.val;
 
+    /**
+     * Select and initialize basic parameters of the timer 
+     */
+    timer_config_t config = {0};
+    config.divider = 16;
+    config.counter_dir = TIMER_COUNT_UP;
+    config.counter_en = TIMER_PAUSE;
+    config.alarm_en = TIMER_ALARM_EN;
+    config.intr_type = TIMER_INTR_LEVEL;
+    config.auto_reload = 1;
+#ifdef TIMER_GROUP_SUPPORTS_XTAL_CLOCK
+    config.clk_src = TIMER_SRC_CLK_APB;  /* ESP32-S2 specific control bit !!!*/
+#endif
+    res = timer_init(handle->config.tg_num, handle->config.timer_num, &config);
+    PWM_AUDIO_CHECK(ESP_OK == res, "Timer group configuration failed", ESP_ERR_INVALID_ARG);
+    timer_isr_register(handle->config.tg_num, handle->config.timer_num, timer_group_isr, NULL, ESP_INTR_FLAG_IRAM, NULL);
+
     /**< set a initial parameter */
     res = pwm_audio_set_param(16000, 8, 2);
     PWM_AUDIO_CHECK(ESP_OK == res, "Set parameter failed", ESP_ERR_INVALID_ARG);
@@ -521,28 +557,14 @@ esp_err_t pwm_audio_set_param(int rate, ledc_timer_bit_t bits, int ch)
     handle->bits_per_sample = bits;
     handle->channel_set_num = ch;
 
-    /* Select and initialize basic parameters of the timer */
-    timer_config_t config = {0};
-    config.divider = 16;
-    config.counter_dir = TIMER_COUNT_UP;
-    config.counter_en = TIMER_PAUSE;
-    config.alarm_en = TIMER_ALARM_EN;
-    config.intr_type = TIMER_INTR_LEVEL;
-    config.auto_reload = 1;
-#ifdef TIMER_GROUP_SUPPORTS_XTAL_CLOCK
-    config.clk_src = TIMER_SRC_CLK_APB;  /* ESP32-S2 specific control bit !!!*/
-#endif
-    res = timer_init(handle->config.tg_num, handle->config.timer_num, &config);
-    PWM_AUDIO_CHECK(ESP_OK == res, "Timer group configuration failed", ESP_ERR_INVALID_ARG);
-
     /* Timer's counter will initially start from value below.
     Also, if auto_reload is set, this value will be automatically reload on alarm */
     timer_set_counter_value(handle->config.tg_num, handle->config.timer_num, 0x00000000ULL);
 
     /* Configure the alarm value and the interrupt on alarm. */
-    timer_set_alarm_value(handle->config.tg_num, handle->config.timer_num, (TIMER_BASE_CLK / config.divider) / handle->framerate);
+    uint32_t divider = handle->timg_dev->hw_timer[handle->config.timer_num].config.divider;
+    timer_set_alarm_value(handle->config.tg_num, handle->config.timer_num, (TIMER_BASE_CLK / divider) / handle->framerate);
     timer_enable_intr(handle->config.tg_num, handle->config.timer_num);
-    timer_isr_register(handle->config.tg_num, handle->config.timer_num, timer_group_isr, NULL, ESP_INTR_FLAG_IRAM, NULL);
     return res;
 }
 
@@ -554,8 +576,8 @@ esp_err_t pwm_audio_set_sample_rate(int rate)
 
     pwm_audio_handle_t handle = g_pwm_audio_handle;
     handle->framerate = rate;
-    uint16_t div = (uint16_t)handle->timg_dev->hw_timer[handle->config.timer_num].config.divider;
-    res = timer_set_alarm_value(handle->config.tg_num, handle->config.timer_num, (TIMER_BASE_CLK / div) / handle->framerate);
+    uint32_t divider = handle->timg_dev->hw_timer[handle->config.timer_num].config.divider;
+    res = timer_set_alarm_value(handle->config.tg_num, handle->config.timer_num, (TIMER_BASE_CLK / divider) / handle->framerate);
     return res;
 }
 
@@ -604,94 +626,94 @@ esp_err_t IRAM_ATTR pwm_audio_write(uint8_t *inbuf, size_t inbuf_len, size_t *by
             uint32_t len = bytes_can_write;
 
             switch (handle->bits_per_sample) {
-                case 8: {
-                    if (shift < 0) {
-                        /**< When the PWM resolution is greater than 8 bits, the value needs to be expanded */
-                        uint16_t value;
-                        uint8_t temp;
-                        shift = -shift;
-                        len >>= 1;
-                        bytes_can_write >>= 1;
-
-                        for (size_t i = 0; i < len; i++) {
-                            temp = (inbuf[i] * handle->volume / VOLUME_0DB) + 0x7f; /**< offset */
-                            value = temp << shift;
-                            rb_write_byte(rb, value);
-                            rb_write_byte(rb, value >> 8);
-                        }
-                    } else {
-                        uint8_t value;
-
-                        for (size_t i = 0; i < len; i++) {
-                            value = (inbuf[i] * handle->volume / VOLUME_0DB) + 0x7f; /**< offset */
-                            rb_write_byte(rb, value);
-                        }
-                    }
-                }
-                break;
-
-                case 16: {
+            case 8: {
+                if (shift < 0) {
+                    /**< When the PWM resolution is greater than 8 bits, the value needs to be expanded */
+                    uint16_t value;
+                    uint8_t temp;
+                    shift = -shift;
                     len >>= 1;
-                    uint16_t *buf_16b = (uint16_t *)inbuf;
-                    static uint16_t value_16b;
-                    int16_t temp;
+                    bytes_can_write >>= 1;
 
-                    if (handle->config.duty_resolution > 8) {
-                        for (size_t i = 0; i < len; i++) {
-                            temp = buf_16b[i];
-                            temp = temp * handle->volume / VOLUME_0DB;
-                            value_16b = temp + 0x7fff; /**< offset */
-                            value_16b >>= shift;
-                            rb_write_byte(rb, value_16b);
-                            rb_write_byte(rb, value_16b >> 8);
-                        }
-                    } else {
-                        /**
-                         * When the PWM resolution is 8 bit, only one byte is transmitted
-                         */
-                        for (size_t i = 0; i < len; i++) {
-                            temp = buf_16b[i];
-                            temp = temp * handle->volume / VOLUME_0DB;
-                            value_16b = temp + 0x7fff; /**< offset */
-                            value_16b >>= shift;
-                            rb_write_byte(rb, value_16b);
-                        }
+                    for (size_t i = 0; i < len; i++) {
+                        temp = (inbuf[i] * handle->volume / VOLUME_0DB) + 0x7f; /**< offset */
+                        value = temp << shift;
+                        rb_write_byte(rb, value);
+                        rb_write_byte(rb, value >> 8);
+                    }
+                } else {
+                    uint8_t value;
+
+                    for (size_t i = 0; i < len; i++) {
+                        value = (inbuf[i] * handle->volume / VOLUME_0DB) + 0x7f; /**< offset */
+                        rb_write_byte(rb, value);
                     }
                 }
-                break;
+            }
+            break;
 
-                case 32: {
-                    len >>= 2;
-                    uint32_t *buf_32b = (uint32_t *)inbuf;
-                    uint32_t value;
-                    int32_t temp;
+            case 16: {
+                len >>= 1;
+                uint16_t *buf_16b = (uint16_t *)inbuf;
+                static uint16_t value_16b;
+                int16_t temp;
 
-                    if (handle->config.duty_resolution > 8) {
-                        for (size_t i = 0; i < len; i++) {
-                            temp = buf_32b[i];
-                            temp = temp * handle->volume / VOLUME_0DB;
-                            value = temp + 0x7fffffff; /**< offset */
-                            value >>= shift;
-                            rb_write_byte(rb, value);
-                            rb_write_byte(rb, value >> 8);
-                        }
-                    } else {
-                        /**
-                         * When the PWM resolution is 8 bit, only one byte is transmitted
-                         */
-                        for (size_t i = 0; i < len; i++) {
-                            temp = buf_32b[i];
-                            temp = temp * handle->volume / VOLUME_0DB;
-                            value = temp + 0x7fffffff; /**< offset */
-                            value >>= shift;
-                            rb_write_byte(rb, value);
-                        }
+                if (handle->config.duty_resolution > 8) {
+                    for (size_t i = 0; i < len; i++) {
+                        temp = buf_16b[i];
+                        temp = temp * handle->volume / VOLUME_0DB;
+                        value_16b = temp + 0x7fff; /**< offset */
+                        value_16b >>= shift;
+                        rb_write_byte(rb, value_16b);
+                        rb_write_byte(rb, value_16b >> 8);
+                    }
+                } else {
+                    /**
+                     * When the PWM resolution is 8 bit, only one byte is transmitted
+                     */
+                    for (size_t i = 0; i < len; i++) {
+                        temp = buf_16b[i];
+                        temp = temp * handle->volume / VOLUME_0DB;
+                        value_16b = temp + 0x7fff; /**< offset */
+                        value_16b >>= shift;
+                        rb_write_byte(rb, value_16b);
                     }
                 }
-                break;
+            }
+            break;
 
-                default:
-                    break;
+            case 32: {
+                len >>= 2;
+                uint32_t *buf_32b = (uint32_t *)inbuf;
+                uint32_t value;
+                int32_t temp;
+
+                if (handle->config.duty_resolution > 8) {
+                    for (size_t i = 0; i < len; i++) {
+                        temp = buf_32b[i];
+                        temp = temp * handle->volume / VOLUME_0DB;
+                        value = temp + 0x7fffffff; /**< offset */
+                        value >>= shift;
+                        rb_write_byte(rb, value);
+                        rb_write_byte(rb, value >> 8);
+                    }
+                } else {
+                    /**
+                     * When the PWM resolution is 8 bit, only one byte is transmitted
+                     */
+                    for (size_t i = 0; i < len; i++) {
+                        temp = buf_32b[i];
+                        temp = temp * handle->volume / VOLUME_0DB;
+                        value = temp + 0x7fffffff; /**< offset */
+                        value >>= shift;
+                        rb_write_byte(rb, value);
+                    }
+                }
+            }
+            break;
+
+            default:
+                break;
             }
 
             inbuf += bytes_can_write;
