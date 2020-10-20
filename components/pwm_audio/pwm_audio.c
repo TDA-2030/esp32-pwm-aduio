@@ -557,6 +557,7 @@ esp_err_t pwm_audio_set_param(int rate, ledc_timer_bit_t bits, int ch)
     handle->bits_per_sample = bits;
     handle->channel_set_num = ch;
 
+    // timer_disable_intr(handle->config.tg_num, handle->config.timer_num);
     /* Timer's counter will initially start from value below.
     Also, if auto_reload is set, this value will be automatically reload on alarm */
     timer_set_counter_value(handle->config.tg_num, handle->config.timer_num, 0x00000000ULL);
@@ -564,7 +565,7 @@ esp_err_t pwm_audio_set_param(int rate, ledc_timer_bit_t bits, int ch)
     /* Configure the alarm value and the interrupt on alarm. */
     uint32_t divider = handle->timg_dev->hw_timer[handle->config.timer_num].config.divider;
     timer_set_alarm_value(handle->config.tg_num, handle->config.timer_num, (TIMER_BASE_CLK / divider) / handle->framerate);
-    timer_enable_intr(handle->config.tg_num, handle->config.timer_num);
+    // timer_enable_intr(handle->config.tg_num, handle->config.timer_num);
     return res;
 }
 
@@ -606,8 +607,8 @@ esp_err_t IRAM_ATTR pwm_audio_write(uint8_t *inbuf, size_t inbuf_len, size_t *by
     TickType_t start_ticks = xTaskGetTickCount();
 
     while (inbuf_len) {
+        uint32_t free = rb_get_free(rb);
         if (ESP_OK == rb_wait_semaphore(rb, ticks_to_wait)) {
-            uint32_t free = rb_get_free(rb);
             uint32_t bytes_can_write = inbuf_len;
 
             if (inbuf_len > free) {
