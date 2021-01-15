@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 #include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
@@ -27,8 +26,6 @@
 #include "soc/timer_group_struct.h"
 #include "soc/ledc_struct.h"
 #include "soc/ledc_reg.h"
-// #include "hal/gpio_ll.h"
-// #include "soc/timer_group_caps.h"
 #include "pwm_audio.h"
 #include "sdkconfig.h"
 
@@ -55,6 +52,7 @@ static const char *PWM_AUDIO_TG_NUM_ERROR     = "PWM AUDIO TIMER GROUP NUMBER ER
 static const char *PWM_AUDIO_TIMER_NUM_ERROR  = "PWM AUDIO TIMER NUMBER ERROR";
 static const char *PWM_AUDIO_ALLOC_ERROR      = "PWM AUDIO ALLOC ERROR";
 static const char *PWM_AUDIO_RESOLUTION_ERROR = "PWM AUDIO RESOLUTION ERROR";
+static const char *PWM_AUDIO_NOT_INITIALIZED  = "PWM AUDIO Uninitialized";
 
 #define BUFFER_MIN_SIZE     (256UL)
 #define SAMPLE_RATE_MAX     (48000)
@@ -66,19 +64,18 @@ static const char *PWM_AUDIO_RESOLUTION_ERROR = "PWM AUDIO RESOLUTION ERROR";
 #define VOLUME_0DB          (16)
 
 /**
- * Debug Configuration 
+ * Debug Configuration
  **/
 #define ISR_DEBUG 0  /**< INDEBUG SWITCH */
 #define ISR_DEBUG_IO_MASK 0x8000
 
 typedef struct {
     char *buf;                         /**< Original pointer */
-    uint32_t volatile head;            /**< ending pointer */
-    uint32_t volatile tail;            /**< Read pointer */
-    uint32_t size;                     /**< Buffer size */
-    uint32_t is_give;                  /**< semaphore give flag */
+    volatile uint32_t head;            /**< ending pointer */
+    volatile uint32_t tail;            /**< Read pointer */
+    volatile uint32_t size;            /**< Buffer size */
+    volatile uint32_t is_give;         /**< semaphore give flag */
     SemaphoreHandle_t semaphore_rb;    /**< Semaphore for ringbuffer */
-
 } ringBuf;
 typedef ringBuf *ringbuf_handle_t;
 
@@ -93,7 +90,6 @@ typedef struct {
     int32_t               framerate;                       /*!< frame rates in Hz */
     int32_t               bits_per_sample;                 /*!< bits per sample (8, 16, 32) */
     int32_t               volume;                          /*!< the volume(-VOLUME_0DB ~ VOLUME_0DB) */
-
     pwm_audio_status_t status;
 } pwm_audio_handle;
 typedef pwm_audio_handle *pwm_audio_handle_t;
@@ -367,7 +363,8 @@ static void IRAM_ATTR timer_group_isr(void *para)
     /**
      * Send semaphore when buffer free is more than BUFFER_MIN_SIZE
      */
-    if (0 == rb->is_give && rb_get_free(rb) > BUFFER_MIN_SIZE) {
+    uint32_t free_size = rb_get_free(rb);
+    if (0 == rb->is_give && free_size > BUFFER_MIN_SIZE) {
         /**< The execution time of the following code is 2.71 microsecond */
         rb->is_give = 1; /**< To prevent multiple give semaphores */
         BaseType_t xHigherPriorityTaskWoken;
@@ -385,6 +382,7 @@ static void IRAM_ATTR timer_group_isr(void *para)
 esp_err_t pwm_audio_get_status(pwm_audio_status_t *status)
 {
     pwm_audio_handle_t handle = g_pwm_audio_handle;
+    PWM_AUDIO_CHECK(NULL != handle, PWM_AUDIO_NOT_INITIALIZED, ESP_ERR_INVALID_STATE);
     *status = handle->status;
     return ESP_OK;
 }
@@ -392,6 +390,7 @@ esp_err_t pwm_audio_get_status(pwm_audio_status_t *status)
 esp_err_t pwm_audio_get_param(int *rate, int *bits, int *ch)
 {
     pwm_audio_handle_t handle = g_pwm_audio_handle;
+    PWM_AUDIO_CHECK(NULL != handle, PWM_AUDIO_NOT_INITIALIZED, ESP_ERR_INVALID_STATE);
 
     if (NULL != rate) {
         *rate = handle->framerate;
@@ -458,6 +457,8 @@ esp_err_t pwm_audio_init(const pwm_audio_config_t *cfg)
      * config ledc to generate pwm
      */
     handle->channel_mask = 0;
+    handle->ledc_channel[CHANNEL_LEFT_INDEX].gpio_num = -1;
+    handle->ledc_channel[CHANNEL_RIGHT_INDEX].gpio_num = -1;
 
     if (handle->config.gpio_num_left >= 0) {
         handle->ledc_channel[CHANNEL_LEFT_INDEX].channel = handle->config.ledc_channel_left;
@@ -515,7 +516,7 @@ esp_err_t pwm_audio_init(const pwm_audio_config_t *cfg)
                              channel[handle->ledc_channel[CHANNEL_RIGHT_INDEX].channel].conf1.val;
 
     /**
-     * Select and initialize basic parameters of the timer 
+     * Select and initialize basic parameters of the timer
      */
     timer_config_t config = {0};
     config.divider = 16;
@@ -528,12 +529,12 @@ esp_err_t pwm_audio_init(const pwm_audio_config_t *cfg)
     config.clk_src = TIMER_SRC_CLK_APB;  /* ESP32-S2 specific control bit !!!*/
 #endif
     res = timer_init(handle->config.tg_num, handle->config.timer_num, &config);
-    PWM_AUDIO_CHECK(ESP_OK == res, "Timer group configuration failed", ESP_ERR_INVALID_ARG);
+    PWM_AUDIO_CHECK(ESP_OK == res, "Timer group configuration failed", ESP_FAIL);
     timer_isr_register(handle->config.tg_num, handle->config.timer_num, timer_group_isr, NULL, ESP_INTR_FLAG_IRAM, NULL);
 
     /**< set a initial parameter */
     res = pwm_audio_set_param(16000, 8, 2);
-    PWM_AUDIO_CHECK(ESP_OK == res, "Set parameter failed", ESP_ERR_INVALID_ARG);
+    PWM_AUDIO_CHECK(ESP_OK == res, "Set parameter failed", ESP_FAIL);
 
     pwm_audio_set_volume(0);
 
@@ -572,6 +573,7 @@ esp_err_t pwm_audio_set_param(int rate, ledc_timer_bit_t bits, int ch)
 esp_err_t pwm_audio_set_sample_rate(int rate)
 {
     esp_err_t res;
+    PWM_AUDIO_CHECK(NULL != g_pwm_audio_handle, PWM_AUDIO_NOT_INITIALIZED, ESP_ERR_INVALID_STATE);
     PWM_AUDIO_CHECK(g_pwm_audio_handle->status != PWM_AUDIO_STATUS_BUSY, PWM_AUDIO_STATUS_ERROR, ESP_ERR_INVALID_ARG);
     PWM_AUDIO_CHECK(rate <= SAMPLE_RATE_MAX && rate >= SAMPLE_RATE_MIN, PWM_AUDIO_FRAMERATE_ERROR, ESP_ERR_INVALID_ARG);
 
@@ -584,14 +586,24 @@ esp_err_t pwm_audio_set_sample_rate(int rate)
 
 esp_err_t pwm_audio_set_volume(int8_t volume)
 {
+    pwm_audio_handle_t handle = g_pwm_audio_handle;
+    PWM_AUDIO_CHECK(NULL != handle, PWM_AUDIO_NOT_INITIALIZED, ESP_ERR_INVALID_STATE);
     if (volume < 0) {
         PWM_AUDIO_CHECK(-volume <= VOLUME_0DB, "Volume is too small", ESP_ERR_INVALID_ARG);
     } else {
         PWM_AUDIO_CHECK(volume <= VOLUME_0DB, "Volume is too large", ESP_ERR_INVALID_ARG);
     }
 
-    pwm_audio_handle_t handle = g_pwm_audio_handle;
     handle->volume = volume + VOLUME_0DB;
+    return ESP_OK;
+}
+
+esp_err_t pwm_audio_get_volume(int8_t *volume)
+{
+    pwm_audio_handle_t handle = g_pwm_audio_handle;
+    PWM_AUDIO_CHECK(NULL != handle, PWM_AUDIO_NOT_INITIALIZED, ESP_ERR_INVALID_STATE);
+    PWM_AUDIO_CHECK(NULL != volume, PWM_AUDIO_PARAM_ADDR_ERROR, ESP_ERR_INVALID_ARG);
+    *volume = handle->volume;
     return ESP_OK;
 }
 
@@ -599,6 +611,7 @@ esp_err_t IRAM_ATTR pwm_audio_write(uint8_t *inbuf, size_t inbuf_len, size_t *by
 {
     esp_err_t res = ESP_OK;
     pwm_audio_handle_t handle = g_pwm_audio_handle;
+    PWM_AUDIO_CHECK(NULL != handle, PWM_AUDIO_NOT_INITIALIZED, ESP_ERR_INVALID_STATE);
     PWM_AUDIO_CHECK(inbuf != NULL && bytes_written != NULL, "Invalid pointer", ESP_ERR_INVALID_ARG);
     PWM_AUDIO_CHECK(inbuf_len != 0, "Length should not be zero", ESP_ERR_INVALID_ARG);
 
@@ -723,6 +736,7 @@ esp_err_t IRAM_ATTR pwm_audio_write(uint8_t *inbuf, size_t inbuf_len, size_t *by
 
         } else {
             res = ESP_FAIL;
+            ESP_LOGD(TAG, "tg config=%x\n", handle->timg_dev->hw_timer[handle->config.timer_num].config.val);
         }
 
         if ((xTaskGetTickCount() - start_ticks) >= ticks_to_wait) {
@@ -737,7 +751,7 @@ esp_err_t pwm_audio_start(void)
 {
     esp_err_t res;
     pwm_audio_handle_t handle = g_pwm_audio_handle;
-    PWM_AUDIO_CHECK(NULL != handle, "Uninitialized", ESP_ERR_INVALID_STATE);
+    PWM_AUDIO_CHECK(NULL != handle, PWM_AUDIO_NOT_INITIALIZED, ESP_ERR_INVALID_STATE);
     PWM_AUDIO_CHECK(handle->status == PWM_AUDIO_STATUS_IDLE, PWM_AUDIO_STATUS_ERROR, ESP_ERR_INVALID_STATE);
 
     handle->status = PWM_AUDIO_STATUS_BUSY;
@@ -745,6 +759,8 @@ esp_err_t pwm_audio_start(void)
     /**< timer enable interrupt */
     portENTER_CRITICAL_SAFE(&timer_spinlock);
     handle->timg_dev->int_ena.val |= BIT(handle->config.timer_num);
+    handle->timg_dev->hw_timer[handle->config.timer_num].config.enable = 1;
+    handle->timg_dev->hw_timer[handle->config.timer_num].config.alarm_en = TIMER_ALARM_EN; /** Make sure the interrupt is enabled*/
     handle->timg_dev->hw_timer[handle->config.timer_num].config.level_int_en = 1;
     portEXIT_CRITICAL_SAFE(&timer_spinlock);
 
@@ -755,12 +771,13 @@ esp_err_t pwm_audio_start(void)
 esp_err_t pwm_audio_stop(void)
 {
     pwm_audio_handle_t handle = g_pwm_audio_handle;
-    PWM_AUDIO_CHECK(NULL != handle, "Uninitialized", ESP_ERR_INVALID_STATE);
+    PWM_AUDIO_CHECK(NULL != handle, PWM_AUDIO_NOT_INITIALIZED, ESP_ERR_INVALID_STATE);
     PWM_AUDIO_CHECK(handle->status == PWM_AUDIO_STATUS_BUSY, PWM_AUDIO_STATUS_ERROR, ESP_ERR_INVALID_STATE);
 
     /**< just disable timer ,keep pwm output to reduce switching nosie */
     /**< timer disable interrupt */
     portENTER_CRITICAL_SAFE(&timer_spinlock);
+    handle->timg_dev->hw_timer[handle->config.timer_num].config.enable = 0;
     handle->timg_dev->int_ena.val &= (~BIT(handle->config.timer_num));
     handle->timg_dev->hw_timer[handle->config.timer_num].config.level_int_en = 0;
     portEXIT_CRITICAL_SAFE(&timer_spinlock);
