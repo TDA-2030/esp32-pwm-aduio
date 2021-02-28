@@ -23,7 +23,7 @@ Connect two speakers to the following LEDC channels / individual GPIOs:
 
 ```
              47R
-GPIO17 +----/\/\/\----+
+GPIO25 +----/\/\/\----+
                       |    
                       | /|
                      +-+ |   Speaker
@@ -34,7 +34,7 @@ GPIO17 +----/\/\/\----+
                       +--------------+ GND
 
              47R
-GPIO18 +----/\/\/\----+
+GPIO26 +----/\/\/\----+
                       |    
                       | /|
                      +-+ |   Speaker
